@@ -18,20 +18,14 @@ venv/
 env/
 ENV/
 
-# ── GW Frame / Data Files ─────────────────────────────────────────────────────
-# Raw detector data (large binary files downloaded from GWOSC/CVMFS)
-cache/frames/
+# ── GW Cache / Data Files ─────────────────────────────────────────────────────
+# Entire cache directory (frames, banks, JSON caches — all auto-generated)
+cache/
 *.gwf
 *.gwf.lock
 *.hdf5
 *.hdf
 *.h5
-
-# Known events JSON cache (auto-fetched from GWOSC API)
-cache/known_events.json
-
-# Template bank caches (regenerated automatically)
-cache/banks/
 
 # ── Search Outputs ────────────────────────────────────────────────────────────
 output/
