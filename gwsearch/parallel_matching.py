@@ -67,11 +67,12 @@ def _process_template_task(task: tuple) -> List[Dict]:
     """
     Process one template against all segments.
     Called inside a Pool worker; uses global _W_SEGMENTS / _W_CFG.
+    Task carries pre-computed waveform as numpy array (no get_fd_waveform in worker).
     """
-    tidx, tmpl, strain_duration, gates, psd_meta, ifo, total_templates = task
+    tidx, hp_arr, delta_f, template_duration, gates, psd_meta, ifo, total_templates = task
 
     from pycbc.filter import matched_filter
-    from pycbc.waveform import get_fd_waveform
+    from pycbc.types import FrequencySeries
     from pycbc.events.eventmgr import ThresholdCluster
 
     cfg = _W_CFG
@@ -79,19 +80,9 @@ def _process_template_task(task: tuple) -> List[Dict]:
     triggers = []
 
     try:
-        hp, _hc = get_fd_waveform(
-            approximant=tmpl["approximant"],
-            mass1=tmpl["mass1"],
-            mass2=tmpl["mass2"],
-            spin1z=tmpl.get("spin1z", 0.0),
-            spin2z=tmpl.get("spin2z", 0.0),
-            delta_f=1.0 / strain_duration,
-            f_lower=tmpl["f_lower"],
-        )
-        hp.resize(len(segments[0][0]) // 2 + 1)
-        template_duration = 1.0 / tmpl["f_lower"] * 100
+        hp = FrequencySeries(hp_arr, delta_f=delta_f)
     except Exception as exc:
-        LOG.warning("Template %d waveform failed: %s", tidx, exc)
+        LOG.warning("Template %d reconstruction failed: %s", tidx, exc)
         return triggers
 
     if not np.all(np.isfinite(hp.data)):
@@ -179,6 +170,41 @@ def _process_template_task(task: tuple) -> List[Dict]:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _precompute_waveforms(
+    templates: List[Dict[str, Any]],
+    strain_duration: float,
+    target_len: int,
+) -> List[Optional[tuple]]:
+    """
+    Pre-compute frequency-domain waveforms in the main process.
+    Returns list of (hp_array, delta_f, template_duration) or None on failure.
+    Avoids get_fd_waveform being called inside each spawn worker.
+    """
+    from pycbc.waveform import get_fd_waveform
+    delta_f = 1.0 / strain_duration
+    results = []
+    for tmpl in templates:
+        try:
+            hp, _hc = get_fd_waveform(
+                approximant=tmpl["approximant"],
+                mass1=tmpl["mass1"],
+                mass2=tmpl["mass2"],
+                spin1z=tmpl.get("spin1z", 0.0),
+                spin2z=tmpl.get("spin2z", 0.0),
+                delta_f=delta_f,
+                f_lower=tmpl["f_lower"],
+            )
+            hp.resize(target_len)
+            if not np.all(np.isfinite(hp.data)):
+                results.append(None)
+            else:
+                results.append((hp.numpy().copy(), delta_f, 1.0 / tmpl["f_lower"] * 100))
+        except Exception as exc:
+            LOG.warning("Waveform pre-compute failed for template: %s", exc)
+            results.append(None)
+    return results
+
+
 def process_templates_parallel(
     templates: List[Dict[str, Any]],
     segments: List[Tuple],
@@ -190,13 +216,13 @@ def process_templates_parallel(
     use_cuda: bool = False,
     max_workers: Optional[int] = None,
     progress_cb=None,
+    n_parallel_ifos: int = 1,
 ) -> List[Dict]:
     """
     Process templates in parallel using multiprocessing.Pool.
 
-    Strain/PSD is passed once to each worker via the Pool initializer,
-    avoiding repeated pickling overhead. Each worker process has its own
-    LAL/PyCBC state, so thread-safety issues are avoided.
+    Waveforms are pre-computed in the main process; workers receive numpy arrays.
+    n_parallel_ifos: how many IFOs run concurrently — used to scale CPU allocation.
     """
     total_templates = len(templates)
     if total_templates == 0:
@@ -205,15 +231,23 @@ def process_templates_parallel(
     n_workers = max_workers or (os.cpu_count() or 1)
     LOG.info("Multiprocessing: %d templates across %d worker processes", total_templates, n_workers)
 
+    # Pre-compute all waveforms in main process (avoids get_fd_waveform in each worker)
+    target_len = len(segments[0][0]) // 2 + 1
+    waveforms = _precompute_waveforms(templates, strain_duration, target_len)
+
     # Set globals BEFORE forking — workers inherit via copy-on-write, zero pickle cost
     global _W_SEGMENTS, _W_CFG
     _W_SEGMENTS = list(segments)
     _W_CFG = cfg
 
     tasks = [
-        (tidx, tmpl, strain_duration, gates, psd_meta, ifo, total_templates)
-        for tidx, tmpl in enumerate(templates)
+        (tidx, wf[0], wf[1], wf[2], gates, psd_meta, ifo, total_templates)
+        for tidx, wf in enumerate(waveforms)
+        if wf is not None
     ]
+    skipped = total_templates - len(tasks)
+    if skipped:
+        LOG.warning("Skipped %d templates due to waveform failure", skipped)
 
     all_triggers: List[Dict] = []
 
@@ -227,14 +261,14 @@ def process_templates_parallel(
                 if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
                     progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
     else:
-        # Linux: spawn N workers, each limited to cpu_count//N OpenMP threads.
-        # This avoids fork+LAL deadlocks while still using all cores.
-        # e.g. 20 cores → 5 workers × 4 OMP threads each.
+        # Linux: spawn N workers, each limited to cpu_count//N OMP threads.
+        # n_parallel_ifos divides available CPUs when H1+L1 run concurrently.
         cpu_count = os.cpu_count() or 1
-        spawn_workers = min(max(2, cpu_count // 4), 8)
-        omp_per_worker = max(1, cpu_count // spawn_workers)
-        LOG.info("Linux: spawn %d workers × %d OMP threads (total %d cores)",
-                 spawn_workers, omp_per_worker, spawn_workers * omp_per_worker)
+        effective_cpus = max(2, cpu_count // max(1, n_parallel_ifos))
+        spawn_workers = min(max(2, effective_cpus // 4), 8)
+        omp_per_worker = max(1, effective_cpus // spawn_workers)
+        LOG.info("Linux: spawn %d workers × %d OMP threads (total %d cores, %d parallel IFOs)",
+                 spawn_workers, omp_per_worker, spawn_workers * omp_per_worker, n_parallel_ifos)
         ctx = __import__("multiprocessing").get_context("spawn")
         seg_data = [(s.numpy().copy(), float(s.delta_t), float(s.start_time),
                      p.numpy().copy(), float(p.delta_f)) for s, p in _W_SEGMENTS]

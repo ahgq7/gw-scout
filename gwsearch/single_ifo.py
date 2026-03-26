@@ -275,7 +275,7 @@ def _gate_and_condition(strain, cfg, exclude_start_sec=None):
     return strain, psd, gates, psd_meta
 
 
-def process_ifo_block(ifo: str, frame_path: Path, cfg: SearchConfig, bank: Dict[str, Any], block_start: float = None, block_end: float = None, progress_cb=None, use_cuda: bool = False) -> List[Dict]:
+def process_ifo_block(ifo: str, frame_path: Path, cfg: SearchConfig, bank: Dict[str, Any], block_start: float = None, block_end: float = None, progress_cb=None, use_cuda: bool = False, n_parallel_ifos: int = 1) -> List[Dict]:
     """Process IFO block with optional CUDA acceleration.
     
     Args:
@@ -397,6 +397,7 @@ def process_ifo_block(ifo: str, frame_path: Path, cfg: SearchConfig, bank: Dict[
                 use_cuda=True,
                 max_workers=max_workers,
                 progress_cb=progress_cb,
+                n_parallel_ifos=n_parallel_ifos,
             )
         else:
             # CPU: multi-threaded processing (NumPy/BLAS releases GIL)
@@ -412,6 +413,7 @@ def process_ifo_block(ifo: str, frame_path: Path, cfg: SearchConfig, bank: Dict[
                 use_cuda=False,
                 max_workers=max_workers,
                 progress_cb=progress_cb,
+                n_parallel_ifos=n_parallel_ifos,
             )
     else:
         # Serial processing (fallback for debugging or single template)

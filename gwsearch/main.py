@@ -180,49 +180,78 @@ def run_search(cfg: SearchConfig) -> None:
 
             per_ifo_triggers: Dict[str, List[Dict]] = {}
             all_data_gaps = True
-            for ifo, frame_path in frame_map.items():
-                try:
-                    per_ifo_triggers[ifo] = single_ifo.process_ifo_block(
-                        ifo=ifo,
-                        frame_path=frame_path,
-                        cfg=cfg,
-                        bank=template_bank,
-                        block_start=block_start,
-                        block_end=block_end,
-                        use_cuda=use_cuda,  # Pass CUDA flag for optimization decisions
-                        progress_cb=lambda frac, done, total, ifo=ifo: state.set_value(
-                            "progress",
-                            json.dumps(
-                                {
-                                    "run_id": run_id,
-                                    "block_start": block_start,
-                                    "block_end": block_end,
-                                    "stage": "processing",
-                                    "pct": 0.2 + 0.5 * max(0.0, min(1.0, frac)),
-                                    "ts": time.time(),
-                                    "msg": f"{ifo}: templates {done}/{total}",
-                                }
-                            ),
-                        ),
-                    )
-                    all_data_gaps = False  # At least one IFO processed successfully
-                except RuntimeError as exc:
-                    # Check if this is a data gap error
-                    if "data gap" in str(exc).lower() or "detector was off" in str(exc).lower() or "rms" in str(exc).lower():
-                        LOG.warning("Data gap detected for %s in block %.1f-%.1f: %s", ifo, block_start, block_end, exc)
-                        per_ifo_triggers[ifo] = []  # Empty triggers for this IFO
-                        continue
-                    else:
-                        # Real error, re-raise
-                        raise
-                except Exception as exc:  # noqa: BLE001
-                    LOG.exception("Processing failed for %s", ifo)
-                    state.set_value(
+
+            # On Linux, process H1 and L1 in parallel threads (each spawns its own pool).
+            # On macOS, fork-based pool uses globals — run sequentially to avoid race conditions.
+            n_ifos = len(frame_map)
+            run_parallel_ifos = sys.platform != "darwin" and n_ifos > 1
+
+            def _process_one_ifo(ifo_frame_pair):
+                ifo, frame_path = ifo_frame_pair
+                return ifo, single_ifo.process_ifo_block(
+                    ifo=ifo,
+                    frame_path=frame_path,
+                    cfg=cfg,
+                    bank=template_bank,
+                    block_start=block_start,
+                    block_end=block_end,
+                    use_cuda=use_cuda,
+                    n_parallel_ifos=n_ifos if run_parallel_ifos else 1,
+                    progress_cb=lambda frac, done, total, ifo=ifo: state.set_value(
                         "progress",
-                        json.dumps({"run_id": run_id, "block_start": block_start, "block_end": block_end, "stage": "error", "pct": 1.0, "ts": time.time(), "msg": f"processing failed {ifo}: {exc}"}),
-                    )
-                    state.record_block(run_id, [ifo], block_start, block_end, status="error", error=str(exc))
-                    raise
+                        json.dumps({
+                            "run_id": run_id,
+                            "block_start": block_start,
+                            "block_end": block_end,
+                            "stage": "processing",
+                            "pct": 0.2 + 0.5 * max(0.0, min(1.0, frac)),
+                            "ts": time.time(),
+                            "msg": f"{ifo}: templates {done}/{total}",
+                        }),
+                    ),
+                )
+
+            if run_parallel_ifos:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                LOG.info("Processing %d IFOs in parallel", n_ifos)
+                with ThreadPoolExecutor(max_workers=n_ifos) as exe:
+                    futures = {exe.submit(_process_one_ifo, (ifo, fp)): ifo
+                               for ifo, fp in frame_map.items()}
+                    for future in as_completed(futures):
+                        ifo = futures[future]
+                        try:
+                            _, triggers = future.result()
+                            per_ifo_triggers[ifo] = triggers
+                            all_data_gaps = False
+                        except RuntimeError as exc:
+                            if "data gap" in str(exc).lower() or "detector was off" in str(exc).lower() or "rms" in str(exc).lower():
+                                LOG.warning("Data gap for %s: %s", ifo, exc)
+                                per_ifo_triggers[ifo] = []
+                            else:
+                                raise
+                        except Exception:
+                            LOG.exception("Processing failed for %s", ifo)
+                            raise
+            else:
+                for ifo, frame_path in frame_map.items():
+                    try:
+                        _, per_ifo_triggers[ifo] = _process_one_ifo((ifo, frame_path))
+                        all_data_gaps = False
+                    except RuntimeError as exc:
+                        if "data gap" in str(exc).lower() or "detector was off" in str(exc).lower() or "rms" in str(exc).lower():
+                            LOG.warning("Data gap detected for %s in block %.1f-%.1f: %s", ifo, block_start, block_end, exc)
+                            per_ifo_triggers[ifo] = []
+                            continue
+                        else:
+                            raise
+                    except Exception as exc:  # noqa: BLE001
+                        LOG.exception("Processing failed for %s", ifo)
+                        state.set_value(
+                            "progress",
+                            json.dumps({"run_id": run_id, "block_start": block_start, "block_end": block_end, "stage": "error", "pct": 1.0, "ts": time.time(), "msg": f"processing failed {ifo}: {exc}"}),
+                        )
+                        state.record_block(run_id, [ifo], block_start, block_end, status="error", error=str(exc))
+                        raise
             
             # If all IFOs have data gaps, skip this block
             if all_data_gaps:
