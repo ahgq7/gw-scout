@@ -211,16 +211,15 @@ def process_templates_parallel(
                 if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
                     progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
     else:
-        # Linux: use threads — PyCBC/FFTW releases the GIL during FFT, so threads run truly
-        # parallel. Avoids fork/spawn deadlocks caused by asyncio threads and LAL init.
-        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-        LOG.info("Linux: using ThreadPoolExecutor (%d threads)", n_workers)
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futs = {executor.submit(_process_template_task, t): i for i, t in enumerate(tasks)}
-            for completed, fut in enumerate(_as_completed(futs)):
-                all_triggers.extend(fut.result())
-                if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
-                    progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
+        # Linux: run templates serially — PyCBC already uses all CPU cores internally via
+        # OpenMP/FFTW for each matched_filter call. Adding Python-level parallelism on top
+        # causes FFTW plan lock deadlocks (fork deadlocks on asyncio, threads deadlock on FFTW).
+        LOG.info("Linux: serial template loop (PyCBC uses all %d cores internally)", n_workers)
+        for completed, task in enumerate(tasks):
+            result = _process_template_task(task)
+            all_triggers.extend(result)
+            if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
+                progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
 
     LOG.info("Parallel done: %d triggers from %d templates", len(all_triggers), total_templates)
     return all_triggers
