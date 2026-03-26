@@ -170,8 +170,15 @@ def run_search(cfg: SearchConfig) -> None:
                                  prev_end, block_start - prev_end, (block_start - prev_end) / 3600)
                         current = prev_end
                     else:
-                        # Fallback: step one block backward
-                        current = block_start
+                        # No data found via GWOSC API — jump directly to end of previous known run segment
+                        prev_run_end = gwosc_io.get_previous_run_end(block_start)
+                        if prev_run_end is not None:
+                            LOG.info("No GWOSC data found; jumping to run boundary GPS %.1f (skipped %.1f hours)",
+                                     prev_run_end, (block_start - prev_run_end) / 3600)
+                            current = prev_run_end
+                        else:
+                            LOG.warning("No previous observing run found before GPS %.1f; stopping backward search", block_start)
+                            break
                     continue
                 else:
                     raise

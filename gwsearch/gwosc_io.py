@@ -303,6 +303,16 @@ def find_previous_available_end(ifos: Iterable[str], before_gps: float) -> Optio
     return None
 
 
+def get_previous_run_end(before_gps: float) -> Optional[float]:
+    """Return the end GPS of the latest known run segment strictly before before_gps."""
+    run_segs = sorted(_get_run_segments(), key=lambda x: x[1])
+    result = None
+    for _, rs, re in run_segs:
+        if re < before_gps:
+            result = re
+    return result
+
+
 @retry(
     retry=retry_if_exception_type((requests.RequestException, IOError)),
     wait=wait_exponential(multiplier=1, min=2, max=60),
