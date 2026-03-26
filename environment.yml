@@ -1,0 +1,50 @@
+name: gwsearch
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+
+  # --- Core scientific stack (NumPy 2 uyumlu) ---
+  - numpy>=2.2,<3
+  - scipy>=1.14,<2
+  - pandas>=2.2.2
+  - h5py>=3.11
+  - matplotlib>=3.8
+  - astropy>=6.1
+  - gwpy>=3.0.9
+
+  # --- App deps ---
+  - typer
+  - rich
+  - pyyaml
+  - requests
+  - httpx
+  - tenacity
+  - cachetools
+  - fastapi
+  - uvicorn
+  - sqlalchemy
+  - pydantic
+  - psutil
+  - orjson
+
+  # --- CUDA toolchain + PyCUDA (GPU için) ---
+  # nvcc gerekiyor (PyCUDA JIT compile için); sadece driver yetmeyebilir.
+  - cuda-version=12.9
+  - cuda-nvcc=12.9.*
+  - pycuda=2025.1.1
+  - mako
+
+  # --- dev tools (ister conda ister pip; burada pip bıraktım) ---
+  - pip:
+      - PyCBC==2.10.0
+      # PyCBC CUDA dokümanındaki "SciKits.cuda" paketi -> pip adı:
+      - scikit-cuda
+      - ruff
+      - pytest
+      - pytest-cov
+      - mypy
+      - types-requests
+      - types-PyYAML
+
