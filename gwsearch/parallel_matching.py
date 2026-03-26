@@ -43,6 +43,22 @@ def _worker_spawn_init(segments, cfg) -> None:
     _W_CFG = cfg
 
 
+def _worker_spawn_init_omp(seg_data, cfg, omp_threads: int) -> None:
+    """Spawn initializer: limit OpenMP/BLAS threads per worker, reconstruct segments."""
+    import os
+    os.environ["OMP_NUM_THREADS"] = str(omp_threads)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(omp_threads)
+    os.environ["MKL_NUM_THREADS"] = str(omp_threads)
+    global _W_SEGMENTS, _W_CFG
+    from pycbc.types import TimeSeries, FrequencySeries
+    _W_SEGMENTS = [
+        (TimeSeries(s_arr, delta_t=dt, epoch=epoch),
+         FrequencySeries(p_arr, delta_f=df))
+        for s_arr, dt, epoch, p_arr, df in seg_data
+    ]
+    _W_CFG = cfg
+
+
 # ---------------------------------------------------------------------------
 # Core per-template processing (runs inside worker process)
 # ---------------------------------------------------------------------------
@@ -211,15 +227,26 @@ def process_templates_parallel(
                 if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
                     progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
     else:
-        # Linux: run templates serially — PyCBC already uses all CPU cores internally via
-        # OpenMP/FFTW for each matched_filter call. Adding Python-level parallelism on top
-        # causes FFTW plan lock deadlocks (fork deadlocks on asyncio, threads deadlock on FFTW).
-        LOG.info("Linux: serial template loop (PyCBC uses all %d cores internally)", n_workers)
-        for completed, task in enumerate(tasks):
-            result = _process_template_task(task)
-            all_triggers.extend(result)
-            if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
-                progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
+        # Linux: spawn N workers, each limited to cpu_count//N OpenMP threads.
+        # This avoids fork+LAL deadlocks while still using all cores.
+        # e.g. 20 cores → 5 workers × 4 OMP threads each.
+        cpu_count = os.cpu_count() or 1
+        spawn_workers = min(max(2, cpu_count // 4), 8)
+        omp_per_worker = max(1, cpu_count // spawn_workers)
+        LOG.info("Linux: spawn %d workers × %d OMP threads (total %d cores)",
+                 spawn_workers, omp_per_worker, spawn_workers * omp_per_worker)
+        ctx = __import__("multiprocessing").get_context("spawn")
+        seg_data = [(s.numpy().copy(), float(s.delta_t), float(s.start_time),
+                     p.numpy().copy(), float(p.delta_f)) for s, p in _W_SEGMENTS]
+        with ctx.Pool(
+            processes=spawn_workers,
+            initializer=_worker_spawn_init_omp,
+            initargs=(seg_data, cfg, omp_per_worker),
+        ) as pool:
+            for completed, result in enumerate(pool.imap_unordered(_process_template_task, tasks, chunksize=4)):
+                all_triggers.extend(result)
+                if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
+                    progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
 
     LOG.info("Parallel done: %d triggers from %d templates", len(all_triggers), total_templates)
     return all_triggers
