@@ -87,6 +87,12 @@ def run_search(cfg: SearchConfig) -> None:
             template_bank = bank.load_or_build_bank(cfg.bank)
     
         # Initialize current position - must happen regardless of template bank type
+        # For backward search: auto-resume from where we left off if state DB has data
+        if (cfg.runtime.search_direction == "backward"
+                and cfg.runtime.start_mode == "latest"
+                and state.get_min_block_start() is not None):
+            cfg.runtime.start_mode = "resume"
+            LOG.info("Backward search: existing state found, switching to resume mode")
         start_time = _resolve_start_time(cfg, state, run_id)
         current = start_time
         
@@ -143,20 +149,21 @@ def run_search(cfg: SearchConfig) -> None:
                     json.dumps({"run_id": run_id, "block_start": block_start, "block_end": block_end, "stage": "frames", "pct": 0.2, "ts": time.time(), "msg": "frames downloaded"}),
                 )
             except Exception as exc:  # noqa: BLE001
-                LOG.exception("Frame fetch failed for block starting %s", block_start)
+                is_no_data = "No GWOSC URLs found" in str(exc)
+                if is_no_data:
+                    LOG.debug("No data for block GPS %.1f-%.1f: %s", block_start, block_end, exc)
+                else:
+                    LOG.exception("Frame fetch failed for block starting %s", block_start)
                 state.set_value(
                     "progress",
-                    json.dumps({"run_id": run_id, "block_start": block_start, "block_end": block_end, "stage": "error", "pct": 1.0, "ts": time.time(), "msg": f"frame fetch error: {exc}"}),
+                    json.dumps({"run_id": run_id, "block_start": block_start, "block_end": block_end, "stage": "gap", "pct": 1.0, "ts": time.time(), "msg": f"no data (gap): {exc}"}),
                 )
-                state.record_block(run_id, list(cfg.runtime.ifos), block_start, block_end, status="error", error=str(exc))
+                state.record_block(run_id, list(cfg.runtime.ifos), block_start, block_end, status="gap" if is_no_data else "error", error=str(exc))
                 if cfg.runtime.follow_latest:
                     time.sleep(cfg.runtime.poll_interval_sec)
                     continue
                 elif cfg.runtime.search_direction == "backward":
-                    # Detector offline or data not public.
-                    # Instead of stepping 512s at a time through potentially months of downtime,
-                    # query GWOSC for the last block where all IFOs had data and jump there.
-                    LOG.warning("Skipping block GPS %.1f-%.1f (no data); searching for last available data...", block_start, block_end)
+                    LOG.info("Gap at GPS %.1f-%.1f — finding last available data...", block_start, block_end)
                     prev_end = gwosc_io.find_previous_available_end(list(cfg.runtime.ifos), block_start)
                     if prev_end is not None and prev_end < block_start - cfg.runtime.block_duration:
                         LOG.info("Jumping backward to GPS %.1f (skipped %.0f seconds / %.1f hours of gap)",
@@ -351,9 +358,16 @@ def run_search(cfg: SearchConfig) -> None:
 
 def _resolve_start_time(cfg: SearchConfig, state: state_mod.StateManager, run_id: int) -> float:
     if cfg.runtime.start_mode == "resume":
-        last = state.get_last_block_end(run_id)
-        if last is not None:
-            return last
+        if cfg.runtime.search_direction == "backward":
+            # For backward search resume: continue from the earliest block we processed
+            min_start = state.get_min_block_start()
+            if min_start is not None:
+                LOG.info("Resuming backward search from GPS %.1f (lowest block_start seen)", min_start)
+                return min_start
+        else:
+            last = state.get_last_block_end(run_id)
+            if last is not None:
+                return last
     if cfg.runtime.start_mode == "gps" and cfg.runtime.start_gps:
         return cfg.runtime.start_gps
     if cfg.runtime.start_mode == "latest":

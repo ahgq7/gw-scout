@@ -297,6 +297,9 @@ tr:hover td{background:rgba(255,255,255,.025)}
 }
 .log-INFO{color:#8b949e}
 .log-WARNING{color:var(--yellow)}
+.assess-gw{color:#3fb950;font-weight:700;white-space:nowrap}
+.assess-marginal{color:#e3b341;font-weight:600;white-space:nowrap}
+.assess-noise{color:#3d4450;white-space:nowrap}
 .log-ERROR{color:var(--red)}
 .log-DEBUG{color:#3d4450}
 
@@ -426,7 +429,7 @@ footer{text-align:center;padding:16px;color:var(--muted);font-size:11px;border-t
       <div class="tbl-wrap">
         <table>
           <thead><tr>
-            <th>UTC Time</th><th>IFOs</th><th>SNR</th><th>IFAR</th><th>Known</th>
+            <th>UTC Time</th><th>IFOs</th><th>SNR</th><th>IFAR</th><th>Assessment</th><th>Known</th>
           </tr></thead>
           <tbody id="cand-body"></tbody>
         </table>
@@ -493,6 +496,15 @@ function fmtIfar(days) {
   if (days > 30)  return `<span class="sig-high">${days.toFixed(1)} days</span>`;
   if (days > 1)   return `<span class="sig-med">${days.toFixed(2)} days</span>`;
   return `<span class="sig-low">${(days*24).toFixed(2)} hr</span>`;
+}
+function fmtAssessment(ifar, snr) {
+  if (ifar == null) return '<span class="sig-low">unknown</span>';
+  // Real GW: IFAR > 100 years (36500 days)
+  if (ifar > 36500) return '<span class="assess-gw">● Confident GW</span>';
+  // Marginal: IFAR > 1 year
+  if (ifar > 365)   return '<span class="assess-marginal">◐ Marginal</span>';
+  // Likely noise
+  return '<span class="assess-noise">○ Noise</span>';
 }
 function pill(t,cls){return`<span class="pill ${cls}">${t}</span>`}
 
@@ -580,6 +592,7 @@ async function refresh() {
         <td>${(r.ifos||[]).join(',')}</td>
         <td><strong>${snr}</strong></td>
         <td>${fmtIfar(ifar)}</td>
+        <td>${fmtAssessment(ifar, typeof r.network_stat === 'number' ? r.network_stat : null)}</td>
         <td>${known}</td>`;
       cbody.appendChild(tr);
     });

@@ -174,6 +174,16 @@ class StateManager:
         row = cur.fetchone()
         return row[0] if row and row[0] is not None else None
 
+    def get_min_block_start(self, run_id: Optional[int] = None) -> Optional[float]:
+        """For backward search resume: return the lowest gps_start processed so far."""
+        cur = self._conn.cursor()
+        if run_id is None:
+            cur.execute("SELECT MIN(gps_start) FROM blocks WHERE status IN ('done','gap')")
+        else:
+            cur.execute("SELECT MIN(gps_start) FROM blocks WHERE run_id=? AND status IN ('done','gap')", (run_id,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else None
+
     def get_value(self, key: str) -> Optional[str]:
         cur = self._conn.cursor()
         cur.execute("SELECT v FROM kv WHERE k=?", (key,))
