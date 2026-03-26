@@ -35,7 +35,7 @@ class GatingConfig:
 
 @dataclass
 class ConditioningConfig:
-    sample_rate: int = 4096
+    sample_rate: int = 2048  # 2048 Hz sufficient for BBH (merger < 1000 Hz); halves FFT cost
     highpass_freq: float = 15.0
     low_frequency_cutoff: float = 20.0
     high_frequency_cutoff: Optional[float] = None
@@ -48,9 +48,9 @@ class ConditioningConfig:
 
 @dataclass
 class BankConfig:
-    min_mass1: float = 2.0
+    min_mass1: float = 10.0  # BBH-only default; BNS/NSBH require min=1.0 but add 10-100x more templates
     max_mass1: float = 80.0
-    min_mass2: float = 2.0
+    min_mass2: float = 10.0
     max_mass2: float = 80.0
     min_spin: float = -0.99
     max_spin: float = 0.99
@@ -68,7 +68,7 @@ class BankConfig:
     use_geometric_bank: bool = True   # Use geometric bank instead of simple grid
     geometric_method: str = "stochastic"  # pycbc_external|stochastic
     min_match: float = 0.97  # Minimal match (1 - mismatch)
-    include_spins: bool = True   # Include aligned-spin templates
+    include_spins: bool = False  # Spins multiply template count 3-5x; disable for real-time searches
     min_spin1z: float = -0.9
     max_spin1z: float = 0.9
     min_spin2z: float = -0.9

@@ -34,7 +34,7 @@ def _parse_frame_coverage(frame_path: Path) -> tuple[float, float]:
         (start_gps, end_gps) tuple
     """
     import re
-    m = re.search(r"-(\d+)-(\d+)\.gwf$", frame_path.name)
+    m = re.search(r"-(\d+)-(\d+)\.(?:gwf|hdf5)$", frame_path.name)
     if not m:
         raise ValueError(f"Cannot parse GPS coverage from filename: {frame_path.name}")
     start = float(m.group(1))
@@ -83,16 +83,14 @@ def _read_strain(frame_path: Path, ifo: str, cfg: SearchConfig, block_start: flo
 
     # Detect O3/O4 data from filename (all modern GWOSC data uses 16KHz bulk files)
     fname_str = str(frame_path)
-    is_modern = any(tag in fname_str for tag in ("O3", "O4", "16KHZ"))
 
-    # CRITICAL: O3/O4 16KHz bulk files ONLY contain 16KHz strain channels
-    # Do NOT attempt 4KHz/2KHz variants - they don't exist and cause XLAL errors
-    if is_modern:
-        candidates = [
-            f"{ifo}:GWOSC-16KHZ_R1_STRAIN",  # O3a, O3b, O4a, O4b
-        ]
+    # Pick channel based on actual sample-rate tag in the filename
+    if "16KHZ" in fname_str:
+        candidates = [f"{ifo}:GWOSC-16KHZ_R1_STRAIN"]
+    elif "4KHZ" in fname_str:
+        candidates = [f"{ifo}:GWOSC-4KHZ_R1_STRAIN"]
     else:
-        # For O1/O2 and older data, try available channels
+        # O1/O2 legacy files
         candidates = [
             f"{ifo}:GWOSC-4KHZ_R1_STRAIN",
             f"{ifo}:LOSC-STRAIN",
@@ -127,46 +125,56 @@ def _read_strain(frame_path: Path, ifo: str, cfg: SearchConfig, block_start: flo
     
     last_err = None
     strain = None
-    for chan in candidates:
+
+    # GWOSC HDF5 files cannot be read via read_frame (GWF-only).
+    # Read them directly with h5py.
+    if str(frame_path).endswith(".hdf5"):
         try:
-            strain = read_frame(str(frame_path), chan, **read_kwargs)
-            LOG.info("Successfully read channel %s from %s", chan, frame_path.name)
-            
-            # Validate and clean immediately after read
-            n_nonfinite = np.sum(~np.isfinite(strain.data))
-            pct_bad = 100.0 * n_nonfinite / len(strain) if len(strain) > 0 else 0
-            
-            # Always clean non-finite values
-            if n_nonfinite > 0:
-                LOG.warning("Frame segment has %d/%d (%.1f%%) non-finite values; sanitizing",
-                           n_nonfinite, len(strain), pct_bad)
-                strain.data = np.nan_to_num(strain.data, nan=0.0, posinf=0.0, neginf=0.0)
-            
-            # Compute RMS after cleaning
-            raw_rms = np.sqrt(np.mean(strain.data**2))
-            LOG.info("Frame segment after cleanup: RMS=%.3e, rate=%.1f Hz, len=%d",
-                    raw_rms, strain.sample_rate, len(strain))
-            
-            # Check if RMS indicates real observing data
-            # Normal strain RMS is ~1e-18. Data gaps/detector off have RMS ~1e-20
-            if raw_rms < 1e-19:
-                LOG.warning("Frame RMS %.3e is far below normal (~1e-18); likely DATA GAP or detector OFF", raw_rms)
-                LOG.warning("This time range (GPS %.1f-%.1f) may not contain observing data",
-                           block_start if block_start else 0, block_end if block_end else 0)
-                # Don't reject - let it process with warning. Will naturally find no triggers.
-            
-            # Proceed with available data
-            LOG.info("Frame segment prepared: RMS=%.3e (normal ~1e-18)", raw_rms)
-            break
-        except Exception as exc:  # noqa: BLE001
+            import h5py
+            with h5py.File(str(frame_path), "r") as hf:
+                gps_file_start = float(hf["meta/GPSstart"][()])
+                dur_total = float(hf["meta/Duration"][()])
+                raw = hf["strain/Strain"][()]
+            n = len(raw)
+            dt = dur_total / n
+            if read_start is not None and read_duration is not None:
+                i0 = max(0, int(round((read_start - gps_file_start) / dt)))
+                i1 = min(n, i0 + int(round(read_duration / dt)))
+                raw = raw[i0:i1]
+                epoch = gps_file_start + i0 * dt
+            else:
+                epoch = gps_file_start
+            from pycbc.types import TimeSeries
+            strain = TimeSeries(raw, delta_t=dt, epoch=epoch)
+            LOG.info("Successfully read HDF5 strain from %s (%.1f Hz, %d samples)",
+                     frame_path.name, strain.sample_rate, len(strain))
+        except Exception as exc:
             last_err = exc
-            LOG.debug("Channel %s read failed: %s", chan, exc)
-            continue
-    
-    # If all channels failed, raise error immediately - do NOT fallback to full frame read
-    # Full frame fallback is wasteful (reads 4096s, 67M samples) and hides boundary issues
+            LOG.debug("HDF5 read failed for %s: %s", frame_path.name, exc)
+
     if strain is None:
-        raise RuntimeError(f"None of channels {candidates} found in {frame_path}: {last_err}")
+        for chan in candidates:
+            try:
+                strain = read_frame(str(frame_path), chan, **read_kwargs)
+                LOG.info("Successfully read channel %s from %s", chan, frame_path.name)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                LOG.debug("Channel %s read failed: %s", chan, exc)
+                continue
+
+    if strain is None:
+        raise RuntimeError(f"Could not read strain from {frame_path}: {last_err}")
+
+    # Validate and clean
+    n_nonfinite = np.sum(~np.isfinite(strain.data))
+    if n_nonfinite > 0:
+        LOG.warning("Frame segment has %d/%d non-finite values; sanitizing", n_nonfinite, len(strain))
+        strain.data = np.nan_to_num(strain.data, nan=0.0, posinf=0.0, neginf=0.0)
+    raw_rms = np.sqrt(np.mean(strain.data**2))
+    LOG.info("Frame segment: RMS=%.3e, rate=%.1f Hz, len=%d", raw_rms, strain.sample_rate, len(strain))
+    if raw_rms < 1e-19:
+        LOG.warning("Frame RMS %.3e far below normal (~1e-18); likely DATA GAP or detector OFF", raw_rms)
     # Check initial strain
     initial_rms = np.sqrt(np.mean(strain.data**2))
     initial_rate = strain.sample_rate
@@ -487,9 +495,10 @@ def process_ifo_block(ifo: str, frame_path: Path, cfg: SearchConfig, bank: Dict[
                     LOG.warning("SNR contains non-finite values for template %d; skipping", tidx)
                     continue
                 
-                # CRITICAL FIX: Remove wraparound corruption (official tutorial method)
-                # FFT circular convolution creates artifacts at edges
-                snr = snr[len(snr)//4 : len(snr)*3//4]
+                # Crop 4 seconds from each edge (FFT wraparound removal).
+                # Matches parallel path in parallel_matching.py.
+                crop_samples = min(int(4 * snr.sample_rate), len(snr) // 8)
+                snr = snr[crop_samples : len(snr) - crop_samples]
                 abs_snr = np.abs(snr.numpy())
                 
                 # Check SNR statistics for debugging

@@ -68,11 +68,9 @@ def compute_chisq_batch(strain, template, psd, peak_indices: np.ndarray, cfg) ->
             _MISSING_CHISQ_WARNED = True
         return np.full(len(peak_indices), float(dof)), np.ones(len(peak_indices))
     
-    # Apply same cropping as SNR (25% wraparound removal)
-    # Match the SNR cropping in single_ifo.py
-    crop_start = len(chisq_ts)//4
-    crop_end = len(chisq_ts)*3//4
-    chisq_ts = chisq_ts[crop_start:crop_end]
+    # Apply same 4-second crop as SNR (must match parallel_matching.py exactly for index alignment)
+    crop_samples = min(int(4 * chisq_ts.sample_rate), len(chisq_ts) // 8)
+    chisq_ts = chisq_ts[crop_samples : len(chisq_ts) - crop_samples]
     
     # Extract chi-squared values at all peak indices (batched)
     chisq_values = []

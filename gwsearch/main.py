@@ -152,7 +152,22 @@ def run_search(cfg: SearchConfig) -> None:
                 if cfg.runtime.follow_latest:
                     time.sleep(cfg.runtime.poll_interval_sec)
                     continue
-                raise
+                elif cfg.runtime.search_direction == "backward":
+                    # Detector offline or data not public.
+                    # Instead of stepping 512s at a time through potentially months of downtime,
+                    # query GWOSC for the last block where all IFOs had data and jump there.
+                    LOG.warning("Skipping block GPS %.1f-%.1f (no data); searching for last available data...", block_start, block_end)
+                    prev_end = gwosc_io.find_previous_available_end(list(cfg.runtime.ifos), block_start)
+                    if prev_end is not None and prev_end < block_start - cfg.runtime.block_duration:
+                        LOG.info("Jumping backward to GPS %.1f (skipped %.0f seconds / %.1f hours of gap)",
+                                 prev_end, block_start - prev_end, (block_start - prev_end) / 3600)
+                        current = prev_end
+                    else:
+                        # Fallback: step one block backward
+                        current = block_start
+                    continue
+                else:
+                    raise
 
             block_id = state.record_block(run_id, list(cfg.runtime.ifos), block_start, block_end, status="processing")
 
@@ -235,10 +250,11 @@ def run_search(cfg: SearchConfig) -> None:
             bkg = background.compute_background(
                 per_ifo_triggers,
                 slides=cfg.background.quick_slides if cfg.bank.quick else cfg.background.production_slides,
-                window=cfg.background.cluster_window,
+                window=cfg.background.coincidence_window,  # Must match foreground (15 ms), not cluster_window
                 slide_spacing=cfg.background.slide_spacing,
                 data_duration=cfg.runtime.block_duration,
                 excise_gps=loud_coinc_gps if loud_coinc_gps else None,
+                require_same_template=cfg.runtime.coincidence_same_template,
             )
 
             candidates = report.build_candidates(
@@ -262,14 +278,14 @@ def run_search(cfg: SearchConfig) -> None:
                     LOG.info("✓ KNOWN EVENTS RECOVERED (%d):", len(known_cands))
                     for c in known_cands:
                         known_name = c["known_event"].get("name", "Unknown") if isinstance(c.get("known_event"), dict) else str(c.get("known_event"))
-                        LOG.info("  - GPS %.3f | %s | SNR %.1f | IFAR %.1f days | Event: %s",
+                        LOG.info("  - GPS %.3f | %s | SNR %.1f | IFAR %.3g days | Event: %s",
                                  c["gps"], "+".join(c["ifos"]), c["network_stat"],
                                  c.get("ifar_days", 0), known_name)
                 
                 if new_cands:
                     LOG.info("★ NEW/UNKNOWN CANDIDATES (%d):", len(new_cands))
                     for c in new_cands:
-                        LOG.info("  - GPS %.3f | %s | SNR %.1f | IFAR %.1f days | *** NEW EVENT ***",
+                        LOG.info("  - GPS %.3f | %s | SNR %.1f | IFAR %.3g days | *** NEW EVENT ***",
                                  c["gps"], "+".join(c["ifos"]), c["network_stat"],
                                  c.get("ifar_days", 0))
                 
@@ -327,13 +343,10 @@ def run_search(cfg: SearchConfig) -> None:
                 if not gwosc_io.has_new_data(list(cfg.runtime.ifos), current, cfg):
                     LOG.info("At current edge; sleeping for %s sec", cfg.runtime.poll_interval_sec)
                     time.sleep(cfg.runtime.poll_interval_sec)
-                continue
-            else:
-                # terminate after single scan if not follow-latest
-                pass
-
-            if not cfg.runtime.follow_latest:
+            elif cfg.runtime.search_direction != "backward":
+                # Forward one-shot: stop after processing the requested block
                 break
+            # backward search: keep looping
 
 
 def _resolve_start_time(cfg: SearchConfig, state: state_mod.StateManager, run_id: int) -> float:

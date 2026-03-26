@@ -74,9 +74,11 @@ def build_candidates(
             LOG.warning("Skipping candidate with invalid network_stat=%s at GPS %.3f",
                        stat, c.get("gps", 0))
             continue
-        if samples:
+        if samples and trials_duration and trials_duration > 0:
+            # FAR = (number of background coincidences louder than candidate) / trials_duration
+            # +1 correction for finite-sample statistics (Farr et al. 2014)
             louder = sum(1 for s in samples if s >= stat)
-            far_hz = (louder + 1) / (len(samples) + 1) * (1.0 / max(cfg.background.cluster_window, 1e-3))
+            far_hz = (louder + 1) / trials_duration
         else:
             far_hz = far_base
         ifar_days = (1.0 / far_hz) / 86400.0 if far_hz else None

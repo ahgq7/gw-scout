@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import Dict, List
 
 import numpy as np
@@ -16,6 +17,7 @@ def compute_background(
     data_duration: float = None,
     excise_gps: List[float] = None,
     excise_window: float = 4.0,
+    require_same_template: bool = False,
 ) -> Dict:
     """
     Time-slide background using symmetric offsets spaced by slide_spacing (seconds).
@@ -31,6 +33,8 @@ def compute_background(
         excise_gps: GPS times of loud foreground events to excise from background triggers
             before computing slides. Prevents signal contamination of the background.
         excise_window: Half-width of the excision window around each excise_gps (seconds).
+        require_same_template: If True, only count background coincidences between triggers
+            with the same template_id. Must match the foreground coincidence criterion.
 
     Returns:
         Dict with far_hz, ifar_days, samples, trials_duration, slide_spacing, slides.
@@ -58,14 +62,46 @@ def compute_background(
     b_trigs = per_ifo_triggers[ifos[1]]
     coincidences = []
     offsets = [k * slide_spacing for k in range(1, slides + 1)]
-    for offset in offsets:
-        for sign in (-1.0, 1.0):
-            dt = sign * offset
-            for h in a_trigs:
-                for l in b_trigs:
-                    if abs(h["gps"] - (l["gps"] + dt)) < window:
-                        stat = float(np.sqrt(h["new_snr"] ** 2 + l["new_snr"] ** 2))
-                        coincidences.append(stat)
+    dt_values = [sign * offset for offset in offsets for sign in (-1.0, 1.0)]
+
+    if require_same_template:
+        # Group by template_id and only search within matching templates.
+        # This avoids O(N_H1 × N_L1) by reducing to sum_t(N_H1_t × N_L1_t).
+        a_by_tid: Dict[str, dict] = defaultdict(lambda: {"gps": [], "snr": []})
+        b_by_tid: Dict[str, dict] = defaultdict(lambda: {"gps": [], "snr": []})
+        for t in a_trigs:
+            a_by_tid[t["template_id"]]["gps"].append(t["gps"])
+            a_by_tid[t["template_id"]]["snr"].append(t["new_snr"])
+        for t in b_trigs:
+            b_by_tid[t["template_id"]]["gps"].append(t["gps"])
+            b_by_tid[t["template_id"]]["snr"].append(t["new_snr"])
+        common_tids = set(a_by_tid.keys()) & set(b_by_tid.keys())
+        for tid in common_tids:
+            h_gps = np.array(a_by_tid[tid]["gps"])
+            h_snr = np.array(a_by_tid[tid]["snr"])
+            l_gps = np.array(b_by_tid[tid]["gps"])
+            l_snr = np.array(b_by_tid[tid]["snr"])
+            h_snr2 = h_snr ** 2
+            l_snr2 = l_snr ** 2
+            for dt in dt_values:
+                # shape (N_h, N_l) — find pairs within window
+                diff = np.abs(h_gps[:, None] - (l_gps[None, :] + dt))
+                mask = diff < window
+                if not np.any(mask):
+                    continue
+                h_idx, l_idx = np.where(mask)
+                stats = np.sqrt(h_snr2[h_idx] + l_snr2[l_idx])
+                coincidences.extend(stats.tolist())
+    else:
+        # All-pairs loop (no template restriction)
+        for offset in offsets:
+            for sign in (-1.0, 1.0):
+                dt = sign * offset
+                for h in a_trigs:
+                    for l in b_trigs:
+                        if abs(h["gps"] - (l["gps"] + dt)) < window:
+                            stat = float(np.sqrt(h["new_snr"] ** 2 + l["new_snr"] ** 2))
+                            coincidences.append(stat)
 
     # Correct trials_duration: total background live-time = 2 * slides * data_duration.
     # The coincidence window (cluster_window) is NOT the data duration — using it here

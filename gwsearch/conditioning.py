@@ -232,6 +232,24 @@ def estimate_psd(strain, cfg, exclude_start_sec=None):
         psd_vals = np.maximum(psd_vals, 1e-40)
         psd_vals = np.nan_to_num(psd_vals, nan=1e-40, posinf=1e-40, neginf=1e-40)
         psd = FrequencySeries(psd_vals, delta_f=psd.delta_f, dtype=psd.dtype)
+
+    # Apply PSD floor: bins many orders of magnitude below median cause the matched
+    # filter to produce SNR >> 1e6, which triggers the safety cutoff and silently
+    # drops ALL triggers for that IFO (seen in H1 O1 data at 2048 Hz).
+    # True LIGO noise PSD should not vary by more than ~6 orders of magnitude;
+    # bins beyond that are numerical artifacts from interpolation or the highpass edge.
+    psd_vals = psd.numpy()
+    valid = psd_vals[psd_vals > 0]
+    if len(valid) > 0:
+        psd_median = float(np.median(valid))
+        psd_floor = psd_median * 1e-6
+        n_floored = int(np.sum(psd_vals < psd_floor))
+        if n_floored > 0:
+            LOG.info("PSD floor: raised %d bins below %.2e to floor=%.2e (median=%.2e)",
+                     n_floored, float(np.min(psd_vals)), psd_floor, psd_median)
+            psd_vals = np.maximum(psd_vals, psd_floor)
+            psd = FrequencySeries(psd_vals, delta_f=psd.delta_f, dtype=psd.dtype)
+
     LOG.info("[PSD-7] estimate_psd() complete, returning")
     meta = {
         "seg_len": int(chosen_len),

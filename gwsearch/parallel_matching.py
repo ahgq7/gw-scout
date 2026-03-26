@@ -94,7 +94,12 @@ def _process_template_task(task: tuple) -> List[Dict]:
         if not np.all(np.isfinite(snr.data)):
             continue
 
-        snr = snr[len(snr) // 4 : len(snr) * 3 // 4]
+        # Crop 4 seconds from each edge to remove FFT wraparound artifacts.
+        # The standard PyCBC GW150914 tutorial uses this approach.
+        # The previous 25%-75% crop removed 144s from each side of a 576s block,
+        # which pushed GW150914 (at GPS+462s) outside the valid window.
+        crop_samples = min(int(4 * snr.sample_rate), len(snr) // 8)
+        snr = snr[crop_samples : len(snr) - crop_samples]
         abs_snr = np.abs(snr.numpy())
 
         if np.max(abs_snr) > 1e6:
