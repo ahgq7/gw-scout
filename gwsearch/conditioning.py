@@ -170,28 +170,33 @@ def estimate_psd(strain, cfg, exclude_start_sec=None):
     chosen_len = None
     chosen_stride = None
     
-    # Set timeout for PSD computation to avoid hanging on bad data
+    # Set timeout for PSD computation to avoid hanging on bad data.
+    # signal.SIGALRM only works in the main thread; skip it in worker threads.
     import signal
-    
+    import threading
+
     class TimeoutError(Exception):
         pass
-    
+
     def timeout_handler(signum, frame):
         raise TimeoutError("PSD computation timeout")
-    
+
+    _in_main_thread = threading.current_thread() is threading.main_thread()
+
     for attempt_idx, (s_len, s_stride) in enumerate(attempts):
         try:
             LOG.info("[PSD-ATTEMPT %d/%d] Trying seg_len=%d, seg_stride=%d",
                     attempt_idx + 1, len(attempts), s_len, s_stride)
-            
-            # Set 30 second timeout for PSD computation
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(30)
+
+            if _in_main_thread:
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(30)
             try:
                 psd, chosen_len, chosen_stride = _compute(s_len, s_stride)
                 LOG.info("[PSD-SUCCESS] PSD computation completed for seg_len=%d", s_len)
             finally:
-                signal.alarm(0)  # Cancel alarm
+                if _in_main_thread:
+                    signal.alarm(0)  # Cancel alarm
             break
         except (ValueError, TimeoutError) as e:
             LOG.warning("[PSD-FAILED] Attempt %d failed (seg_len=%d): %s", attempt_idx + 1, s_len, e)
