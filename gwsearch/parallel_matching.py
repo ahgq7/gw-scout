@@ -202,19 +202,25 @@ def process_templates_parallel(
     all_triggers: List[Dict] = []
 
     import sys
-    # macOS: use fork (copies globals, fast). Linux: use spawn to avoid asyncio thread deadlock.
     if sys.platform == "darwin":
+        # macOS: fork copies globals to workers, no pickle overhead
         ctx = __import__("multiprocessing").get_context("fork")
-        init_fn, init_args = _worker_noop_init, ()
+        with ctx.Pool(processes=n_workers, initializer=_worker_noop_init) as pool:
+            for completed, result in enumerate(pool.imap_unordered(_process_template_task, tasks, chunksize=4)):
+                all_triggers.extend(result)
+                if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
+                    progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
     else:
-        ctx = __import__("multiprocessing").get_context("spawn")
-        init_fn, init_args = _worker_spawn_init, (list(segments), cfg)
-
-    with ctx.Pool(processes=n_workers, initializer=init_fn, initargs=init_args) as pool:
-        for completed, result in enumerate(pool.imap_unordered(_process_template_task, tasks, chunksize=4)):
-            all_triggers.extend(result)
-            if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
-                progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
+        # Linux: use threads — PyCBC/FFTW releases the GIL during FFT, so threads run truly
+        # parallel. Avoids fork/spawn deadlocks caused by asyncio threads and LAL init.
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        LOG.info("Linux: using ThreadPoolExecutor (%d threads)", n_workers)
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futs = {executor.submit(_process_template_task, t): i for i, t in enumerate(tasks)}
+            for completed, fut in enumerate(_as_completed(futs)):
+                all_triggers.extend(fut.result())
+                if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
+                    progress_cb((completed + 1) / total_templates, completed + 1, total_templates)
 
     LOG.info("Parallel done: %d triggers from %d templates", len(all_triggers), total_templates)
     return all_triggers
