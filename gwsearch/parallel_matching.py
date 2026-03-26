@@ -36,6 +36,13 @@ def _worker_noop_init() -> None:
     pass
 
 
+def _worker_spawn_init(segments, cfg) -> None:
+    """Initializer for spawn context: set globals from passed args."""
+    global _W_SEGMENTS, _W_CFG
+    _W_SEGMENTS = segments
+    _W_CFG = cfg
+
+
 # ---------------------------------------------------------------------------
 # Core per-template processing (runs inside worker process)
 # ---------------------------------------------------------------------------
@@ -194,9 +201,16 @@ def process_templates_parallel(
 
     all_triggers: List[Dict] = []
 
-    # 'fork' copies parent memory to workers — no re-import of pycbc, no pickle of strain/PSD
-    ctx = __import__("multiprocessing").get_context("fork")
-    with ctx.Pool(processes=n_workers, initializer=_worker_noop_init) as pool:
+    import sys
+    # macOS: use fork (copies globals, fast). Linux: use spawn to avoid asyncio thread deadlock.
+    if sys.platform == "darwin":
+        ctx = __import__("multiprocessing").get_context("fork")
+        init_fn, init_args = _worker_noop_init, ()
+    else:
+        ctx = __import__("multiprocessing").get_context("spawn")
+        init_fn, init_args = _worker_spawn_init, (list(segments), cfg)
+
+    with ctx.Pool(processes=n_workers, initializer=init_fn, initargs=init_args) as pool:
         for completed, result in enumerate(pool.imap_unordered(_process_template_task, tasks, chunksize=4)):
             all_triggers.extend(result)
             if progress_cb and (completed % 32 == 0 or completed == total_templates - 1):
