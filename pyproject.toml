@@ -27,6 +27,7 @@ dependencies = [
   "httpx>=0.26.0",
   "tenacity>=8.2.3",
   "cachetools>=5.3.3",
+  "filelock>=3.13.0",
 
   # PyCBC 2.10
   "PyCBC>=2.10.0",
