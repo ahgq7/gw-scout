@@ -1,0 +1,108 @@
+{
+  "runtime": {
+    "ifos": [
+      "H1",
+      "L1"
+    ],
+    "start_mode": "resume",
+    "start_gps": null,
+    "lookback_sec": 604800.0,
+    "follow_latest": false,
+    "poll_interval_sec": 3.0,
+    "block_duration": 512.0,
+    "chunk_duration": 128.0,
+    "keep_frames": false,
+    "graceful_stop": true,
+    "stop_file": "output/STOP",
+    "dashboard": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 7860,
+      "update_interval": 5.0
+    },
+    "detection_snr_threshold": 8.0,
+    "coincidence_same_template": true,
+    "known_event_gps": null,
+    "center_event_in_window": false,
+    "search_direction": "backward",
+    "backward_stop_gps": 1126051217.0,
+    "enable_parallel": true,
+    "parallel_workers": null,
+    "chisq_snr_threshold": 9.0
+  },
+  "conditioning": {
+    "sample_rate": 2048,
+    "highpass_freq": 15.0,
+    "low_frequency_cutoff": 20.0,
+    "high_frequency_cutoff": null,
+    "psd_estimation": "median",
+    "psd_duration": 64.0,
+    "psd_stride": 8.0,
+    "notch_list": [],
+    "resample_rate": null
+  },
+  "gating": {
+    "snr_threshold": 50.0,
+    "pad": 0.25,
+    "taper": 0.5,
+    "max_duration": 2.0
+  },
+  "bank": {
+    "min_mass1": 10.0,
+    "max_mass1": 80.0,
+    "min_mass2": 10.0,
+    "max_mass2": 80.0,
+    "min_spin": -0.99,
+    "max_spin": 0.99,
+    "mismatch": 0.03,
+    "approximant": "IMRPhenomD",
+    "f_lower": 20.0,
+    "quick": false,
+    "cache_dir": "cache/banks",
+    "max_templates_quick": 256,
+    "quick_test_gw150914": false,
+    "exclude_signal_from_psd_sec": 0.0,
+    "use_geometric_bank": true,
+    "geometric_method": "stochastic",
+    "min_match": 0.97,
+    "include_spins": false,
+    "min_spin1z": -0.9,
+    "max_spin1z": 0.9,
+    "min_spin2z": -0.9,
+    "max_spin2z": 0.9,
+    "spin_grid_values": [
+      -0.5,
+      0.0,
+      0.5
+    ]
+  },
+  "background": {
+    "time_slides": 50,
+    "slide_spacing": 0.1,
+    "cluster_window": 0.5,
+    "max_lag": 5.0,
+    "production_slides": 200,
+    "quick_slides": 50,
+    "min_ifar_days": 0.01,
+    "use_advanced_background": false,
+    "num_slides": 100,
+    "slide_step": 0.1,
+    "max_slide_offset": 100.0,
+    "circular_slides": true,
+    "coincidence_window": 0.015,
+    "reference_detector": "H1",
+    "target_far_per_year": 1.0
+  },
+  "paths": {
+    "output_dir": "output",
+    "cache_dir": "cache",
+    "frames_dir": "cache/frames",
+    "state_db": "state/gwsearch.sqlite",
+    "log_dir": "logs"
+  },
+  "known_events": {
+    "cache_file": "cache/known_events.json",
+    "api_url": "https://gwosc.org/api/v2/event-versions?pagesize=100"
+  },
+  "config_hash": "fc2098317d43af66664f0f1337a49fcd8e945f0f8e21c87ed1f6e9a771b53a8f"
+}
